@@ -4,6 +4,7 @@
   "private": true,
   "description": "OpenClaw on Render — one-click deploy, powered by @chrysb/alphaclaw",
   "scripts": {
+    "test": "node --test",
     "dev": "docker compose up --build",
     "dev:stop": "docker compose down",
     "dev:clean": "docker compose down -v",
