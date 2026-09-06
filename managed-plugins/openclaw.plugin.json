@@ -1,0 +1,14 @@
+{
+  "id": "gmail-triage-recovery",
+  "name": "Gmail triage recovery",
+  "description": "Durable bounded Gmail triage and delivery",
+  "version": "1.0.0",
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

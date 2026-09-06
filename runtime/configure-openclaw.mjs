@@ -17,6 +17,8 @@ const MANAGED_TRANSFORM_MODULE = "gmail/gmail-triage-v1.mjs";
 const MANAGED_TRANSFORM = fileURLToPath(
   new URL("../managed-hooks/gmail/gmail-transform.mjs", import.meta.url),
 );
+const RECOVERY_PLUGIN_ID = "gmail-triage-recovery";
+const RECOVERY_PLUGIN_PATH = "/app/managed-plugins/gmail-triage-recovery.mjs";
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
@@ -96,6 +98,7 @@ function ensurePrivateRuntimeFilesStayLocal(stateDir) {
   const rules = [
     "runtime/gmail-delivery.json*",
     "runtime/gmail-triage.sqlite*",
+    "runtime/gmail-triage.key*",
     "backups/pre-gmail-cost-fix-v1.json*",
     "backups/pre-gmail-cost-fix-v1-transform.mjs*",
     "workspace-mail-triage/",
@@ -204,6 +207,31 @@ export function patchOpenClawConfig(current, stateDir) {
       ...new Set([...config.hooks.allowedAgentIds, TRIAGE_AGENT_ID]),
     ];
   }
+
+  config.plugins ||= {};
+  config.plugins.load ||= {};
+  const pluginPaths = Array.isArray(config.plugins.load.paths)
+    ? config.plugins.load.paths
+    : [];
+  config.plugins.load.paths = [
+    ...new Set([...pluginPaths, RECOVERY_PLUGIN_PATH]),
+  ];
+  if (Array.isArray(config.plugins.allow)) {
+    config.plugins.allow = [
+      ...new Set([...config.plugins.allow, RECOVERY_PLUGIN_ID]),
+    ];
+  }
+  config.plugins.entries ||= {};
+  config.plugins.entries[RECOVERY_PLUGIN_ID] = {
+    ...(config.plugins.entries[RECOVERY_PLUGIN_ID] || {}),
+    enabled: true,
+    llm: {
+      ...(config.plugins.entries[RECOVERY_PLUGIN_ID]?.llm || {}),
+      allowAgentIdOverride: true,
+      allowModelOverride: true,
+      allowedModels: [TRIAGE_MODEL],
+    },
+  };
   return config;
 }
 
