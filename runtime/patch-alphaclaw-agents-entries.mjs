@@ -20,6 +20,8 @@ const WORKSPACE_PATCH_MARKER =
   "// OpenClaw 2026.8.2 compatibility: sync workspaces from keyed agent entries.";
 const SYSTEM_ROUTE_PATCH_MARKER =
   "// OpenClaw 2026.8.2 compatibility: label sessions from keyed agent entries.";
+const EXEC_APPROVALS_PATCH_MARKER =
+  "// OpenClaw 2026.8.2 compatibility: exec approvals live in shared SQLite state.";
 
 function replaceExactly(source, before, after, expectedCount, label) {
   let offset = 0;
@@ -359,6 +361,46 @@ const { listAgentsFromConfig } = require("../agents/shared");`,
   return { source: patched, changed: true };
 }
 
+export function patchAlphaClawExecDefaultsSource(source) {
+  if (source.includes(EXEC_APPROVALS_PATCH_MARKER)) {
+    if (!source.includes("approvalsChanged = false;")) {
+      throw new Error("AlphaClaw exec approvals compatibility patch is incomplete");
+    }
+    return { source, changed: false };
+  }
+
+  const patched = replaceExactly(
+    source,
+    `  const approvalsPath = resolveExecApprovalsConfigPath({ openclawDir });
+  const approvalsExists =
+    typeof fsModule.existsSync === "function" ? fsModule.existsSync(approvalsPath) : null;
+  const approvals = readExecApprovalsConfig({
+    fsModule,
+    openclawDir,
+    fallback: approvalsExists === true ? null : { version: 1 },
+  });
+  if (approvals && typeof approvals === "object" && !Array.isArray(approvals)) {
+    const ensuredApprovals = ensureManagedExecApprovalsDefaults(approvals);
+    if (ensuredApprovals.changed || approvalsExists === false) {
+      writeExecApprovalsConfig({
+        fsModule,
+        openclawDir,
+        file: ensuredApprovals.file,
+        spacing: 2,
+      });
+      approvalsChanged = true;
+    }
+  }`,
+    `${EXEC_APPROVALS_PATCH_MARKER}
+  // Do not recreate the retired JSON file: its mere presence blocks the new
+  // runtime after Doctor has migrated approvals into shared SQLite state.
+  approvalsChanged = false;`,
+    1,
+    "retired exec approvals file",
+  );
+  return { source: patched, changed: true };
+}
+
 function atomicWrite(path, source) {
   const mode = statSync(path).mode & 0o777;
   const temporaryPath = `${path}.${process.pid}.tmp`;
@@ -389,6 +431,7 @@ export function patchInstalledAlphaClawAgentsEntries(options = {}) {
   const codexRuntimePath = join(packageRoot, "lib/server/codex-runtime-config.js");
   const workspacePath = join(packageRoot, "lib/server/onboarding/workspace.js");
   const systemRoutePath = join(packageRoot, "lib/server/routes/system.js");
+  const execDefaultsPath = join(packageRoot, "lib/server/exec-defaults-config.js");
   const sharedResult = patchAlphaClawAgentSharedSource(
     readFileSync(sharedPath, "utf8"),
   );
@@ -404,6 +447,9 @@ export function patchInstalledAlphaClawAgentsEntries(options = {}) {
   const systemRouteResult = patchAlphaClawSystemRouteSource(
     readFileSync(systemRoutePath, "utf8"),
   );
+  const execDefaultsResult = patchAlphaClawExecDefaultsSource(
+    readFileSync(execDefaultsPath, "utf8"),
+  );
 
   if (sharedResult.changed) atomicWrite(sharedPath, sharedResult.source);
   if (webhookResult.changed) atomicWrite(webhookPath, webhookResult.source);
@@ -414,18 +460,23 @@ export function patchInstalledAlphaClawAgentsEntries(options = {}) {
   if (systemRouteResult.changed) {
     atomicWrite(systemRoutePath, systemRouteResult.source);
   }
+  if (execDefaultsResult.changed) {
+    atomicWrite(execDefaultsPath, execDefaultsResult.source);
+  }
   return {
     changed:
       sharedResult.changed ||
       webhookResult.changed ||
       codexRuntimeResult.changed ||
       workspaceResult.changed ||
-      systemRouteResult.changed,
+      systemRouteResult.changed ||
+      execDefaultsResult.changed,
     sharedPath,
     webhookPath,
     codexRuntimePath,
     workspacePath,
     systemRoutePath,
+    execDefaultsPath,
   };
 }
 

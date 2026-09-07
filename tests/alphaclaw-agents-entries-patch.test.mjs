@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 import {
   patchAlphaClawAgentSharedSource,
   patchAlphaClawCodexRuntimeSource,
+  patchAlphaClawExecDefaultsSource,
   patchAlphaClawSystemRouteSource,
   patchAlphaClawWebhookConfigSource,
   patchAlphaClawWorkspaceSource,
@@ -90,6 +91,10 @@ test("the AlphaClaw entries patches apply exactly once to the pinned source", ()
     join(SOURCE_PACKAGE_ROOT, "lib/server/routes/system.js"),
     "utf8",
   );
+  const execDefaults = readFileSync(
+    join(SOURCE_PACKAGE_ROOT, "lib/server/exec-defaults-config.js"),
+    "utf8",
+  );
 
   const patchedShared = patchAlphaClawAgentSharedSource(shared);
   assert.equal(patchedShared.changed, true);
@@ -121,6 +126,27 @@ test("the AlphaClaw entries patches apply exactly once to the pinned source", ()
     patchAlphaClawSystemRouteSource(patchedSystemRoute.source).changed,
     false,
   );
+  const patchedExecDefaults = patchAlphaClawExecDefaultsSource(execDefaults);
+  assert.equal(patchedExecDefaults.changed, true);
+  assert.equal(
+    patchAlphaClawExecDefaultsSource(patchedExecDefaults.source).changed,
+    false,
+  );
+});
+
+test("AlphaClaw does not recreate the retired exec approvals JSON", (t) => {
+  const { root, packageRoot } = patchedCandidate(t);
+  const stateDir = join(root, "state-no-legacy-approvals");
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(join(stateDir, "openclaw.json"), "{}\n");
+
+  const require = createRequire(join(packageRoot, "compatibility-test.cjs"));
+  const { ensureManagedExecDefaults } = require(
+    join(packageRoot, "lib/server/exec-defaults-config.js"),
+  );
+  const result = ensureManagedExecDefaults({ fsModule: fs, openclawDir: stateDir });
+  assert.equal(result.approvalsChanged, false);
+  assert.equal(fs.existsSync(join(stateDir, "exec-approvals.json")), false);
 });
 
 test("AlphaClaw agent reads and writes round-trip canonical entries only", (t) => {
