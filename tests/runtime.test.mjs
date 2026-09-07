@@ -222,7 +222,9 @@ function baseConfig() {
           "anthropic/claude-sonnet-5": { alias: "sonnet" },
         },
       },
-      list: [{ id: "main", default: true, tools: { profile: "full" } }],
+      entries: {
+        main: { default: true, tools: { profile: "full" } },
+      },
     },
     hooks: {
       allowedAgentIds: ["main"],
@@ -849,21 +851,55 @@ test("AlphaClaw retries Gmail IDs until the durable gateway accepts them", async
   }
 });
 
+test("the compatible AlphaClaw commit is pinned to the live database schemas", () => {
+  const dependency = JSON.parse(
+    readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+  ).dependencies["@chrysb/alphaclaw"];
+  assert.equal(
+    dependency,
+    "https://github.com/chrysb/alphaclaw/archive/c3c9d023ba3c74a535a3cfb04e063f6c499554fa.tar.gz",
+  );
+  const alphaclawRoot = fileURLToPath(
+    new URL("../node_modules/@chrysb/alphaclaw/", import.meta.url),
+  );
+  const alphaclawPackage = JSON.parse(
+    readFileSync(join(alphaclawRoot, "package.json"), "utf8"),
+  );
+  const openclawPackage = JSON.parse(
+    readFileSync(
+      new URL("../node_modules/openclaw/package.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  assert.equal(alphaclawPackage.dependencies.openclaw, "2026.8.2");
+  assert.deepEqual(openclawPackage.openclaw.schemaVersions, {
+    state: 15,
+    agent: 19,
+  });
+  const gatewaySource = readFileSync(
+    join(alphaclawRoot, "lib/server/gateway.js"),
+    "utf8",
+  );
+  assert.match(gatewaySource, /OPENCLAW_NO_AUTO_UPDATE:\s*"1"/);
+  assert.match(gatewaySource, /OPENCLAW_SUPERVISOR_MODE:\s*"external"/);
+});
+
 test("config patch isolates Gmail, preserves main, and restricts the worker", () => {
   const original = baseConfig();
   const patched = patchOpenClawConfig(original, "/data/.openclaw");
-  assert.deepEqual(original.agents.list, [
-    { id: "main", default: true, tools: { profile: "full" } },
-  ]);
+  assert.deepEqual(original.agents.entries, {
+    main: { default: true, tools: { profile: "full" } },
+  });
   assert.deepEqual(original.agents.defaults.models, {
     "anthropic/claude-sonnet-5": { alias: "sonnet" },
   });
 
-  const triage = patched.agents.list.find((agent) => agent.id === "mail-triage");
+  const triage = patched.agents.entries["mail-triage"];
   assert.equal(triage.model.primary, "anthropic/claude-haiku-4-5");
   assert.equal(triage.contextInjection, "never");
   assert.deepEqual(triage.skills, []);
-  assert.deepEqual(triage.memorySearch, { enabled: false });
+  assert.deepEqual(triage.memory, { search: { enabled: false } });
+  assert.equal(Object.hasOwn(triage, "memorySearch"), false);
   assert.deepEqual(triage.tools, {
     profile: "minimal",
     deny: ["session_status"],
@@ -894,16 +930,167 @@ test("config patch isolates Gmail, preserves main, and restricts the worker", ()
 
 test("config patch preserves implicit main and an allow-any model setup", () => {
   const config = baseConfig();
-  delete config.agents.list;
+  delete config.agents.entries;
   delete config.agents.defaults.models;
 
   const patched = patchOpenClawConfig(config, "/data/.openclaw");
-  assert.deepEqual(patched.agents.list[0], { id: "main", default: true });
+  assert.deepEqual(patched.agents.entries.main, { default: true });
   assert.equal(patched.agents.defaults.models, undefined);
+  assert.ok(patched.agents.entries["mail-triage"]);
+});
+
+test("config patch removes the legacy triage memory key on upgrade", () => {
+  const config = baseConfig();
+  config.agents.entries["mail-triage"] = {
+    memorySearch: { enabled: false },
+  };
+
+  const patched = patchOpenClawConfig(config, "/data/.openclaw");
+  const triage = patched.agents.entries["mail-triage"];
+  assert.equal(Object.hasOwn(triage, "memorySearch"), false);
+  assert.deepEqual(triage.memory, { search: { enabled: false } });
+});
+
+test("config patch normalizes copied OpenClaw 2 compatibility fields", () => {
+  const config = baseConfig();
+  config.meta = {
+    lastTouchedAt: "2026-08-31T00:00:00Z",
+    lastTouchedVersion: "2026.7.1",
+  };
+  config.gateway = { tailscale: { mode: "off", resetOnExit: false } };
+
+  const patched = patchOpenClawConfig(config, "/data/.openclaw");
+  assert.deepEqual(patched.meta, { lastTouchedVersion: "2026.7.1" });
+  assert.deepEqual(patched.gateway.tailscale, { mode: "off" });
+});
+
+test("config patch lets entries win and safely deep-merges legacy memory search", () => {
+  const config = baseConfig();
+  config.agents.entries.main.memory = {
+    search: { provider: "local", query: { minScore: 0.4 } },
+  };
+  config.agents.entries.main.memorySearch = {
+    enabled: false,
+    provider: "auto",
+    inputType: "",
+    query: {
+      maxResults: 5,
+      minScore: 0.1,
+      hybrid: { enabled: true },
+    },
+    maxResults: 9,
+    remote: {
+      baseUrl: "https://embeddings.example.test",
+      apiKey: {
+        source: "env",
+        provider: "default",
+        id: "OPENAI_API_KEY",
+        unexpected: "drop-me",
+      },
+      headers: { Authorization: "Bearer token" },
+      batch: { enabled: true, concurrency: 3 },
+    },
+    chunking: { tokens: 999 },
+    sync: { watch: true },
+    store: {
+      path: "/legacy/memory.sqlite",
+      driver: "sqlite",
+      vector: { enabled: false, unexpected: true },
+    },
+    cache: { enabled: false, maxEntries: 10 },
+  };
+  config.agents.list = [
+    { id: "main", name: "Stale main" },
+    { id: "shadow", name: "Must not be resurrected" },
+  ];
+
+  const patched = patchOpenClawConfig(config, "/data/.openclaw");
+  assert.equal(Object.hasOwn(patched.agents, "list"), false);
+  assert.equal(Object.hasOwn(patched.agents.entries, "shadow"), false);
+  assert.equal(patched.agents.entries.main.name, undefined);
+  assert.deepEqual(patched.agents.entries.main.memory.search, {
+    provider: "local",
+    query: { minScore: 0.4, maxResults: 5 },
+    enabled: false,
+    remote: {
+      baseUrl: "https://embeddings.example.test",
+      apiKey: {
+        source: "env",
+        provider: "default",
+        id: "OPENAI_API_KEY",
+      },
+      headers: { Authorization: "Bearer token" },
+      batch: { enabled: true },
+    },
+    store: { vector: { enabled: false } },
+    cache: { enabled: false },
+  });
   assert.equal(
-    patched.agents.list.filter((agent) => agent.id === "mail-triage").length,
-    1,
+    Object.hasOwn(patched.agents.entries.main, "memorySearch"),
+    false,
   );
+});
+
+test("config patch migrates the legacy agent list to canonical entries", () => {
+  const config = baseConfig();
+  delete config.agents.entries;
+  config.agents.list = [
+    { id: "main", default: true, tools: { profile: "full" } },
+    { id: "mail-triage", memorySearch: { enabled: false } },
+  ];
+
+  const patched = patchOpenClawConfig(config, "/data/.openclaw");
+  assert.equal(Object.hasOwn(patched.agents, "list"), false);
+  assert.deepEqual(patched.agents.entries.main, {
+    default: true,
+    tools: { profile: "full" },
+  });
+  assert.deepEqual(patched.agents.entries["mail-triage"].memory, {
+    search: { enabled: false },
+  });
+});
+
+test("config patch retains an unused Voyage profile without enabling its plugin", () => {
+  const config = baseConfig();
+  config.auth = {
+    profiles: {
+      "voyage:default": { provider: "voyage", mode: "api_key" },
+    },
+  };
+
+  const patched = patchOpenClawConfig(config, "/data/.openclaw");
+  assert.deepEqual(patched.auth.profiles["voyage:default"], {
+    provider: "voyage",
+    mode: "api_key",
+  });
+  assert.deepEqual(patched.plugins.entries.voyage, { enabled: false });
+});
+
+test("config patch does not disable Voyage when memory explicitly selects it", () => {
+  const config = baseConfig();
+  config.auth = {
+    profiles: {
+      "voyage:default": { provider: "voyage", mode: "api_key" },
+    },
+  };
+  config.memory = { search: { provider: "voyage" } };
+
+  const patched = patchOpenClawConfig(config, "/data/.openclaw");
+  assert.equal(Object.hasOwn(patched.plugins.entries, "voyage"), false);
+});
+
+test("config patch preserves an explicit Voyage plugin choice", () => {
+  const config = baseConfig();
+  config.auth = {
+    profiles: {
+      "voyage:default": { provider: "voyage", mode: "api_key" },
+    },
+  };
+  config.plugins = { entries: {} };
+  config.plugins.entries.voyage = { enabled: true };
+
+  const patched = patchOpenClawConfig(config, "/data/.openclaw");
+  assert.deepEqual(patched.plugins.entries.voyage, { enabled: true });
 });
 
 test("an existing plugin allowlist is extended without replacement", () => {
@@ -955,10 +1142,7 @@ test("managed runtime migrates the private route and is idempotent", async () =>
   assert.equal(validations, 2);
   const saved = JSON.parse(readFileSync(configPath, "utf8"));
   assert.equal(saved.plugins.entries["gmail-triage-recovery"].enabled, true);
-  assert.equal(
-    saved.agents.list.filter((agent) => agent.id === "mail-triage").length,
-    1,
-  );
+  assert.ok(saved.agents.entries["mail-triage"]);
 });
 
 test("the canonical transform and recovery plugin survive AlphaClaw renewal", async () => {
@@ -1025,6 +1209,86 @@ test("a missing private route is non-fatal and leaves config untouched", async (
   assert.equal(result.status, "skipped");
   assert.equal(readFileSync(configPath, "utf8"), before);
   assert.equal(existsSync(join(stateDir, "runtime/gmail-delivery.json")), false);
+});
+
+test("compatibility normalization runs before a missing-route early return", async () => {
+  const { stateDir, configPath } = writeRuntimeFixture({
+    routeInTransform: false,
+  });
+  const original = JSON.parse(readFileSync(configPath, "utf8"));
+  original.meta = {
+    lastTouchedAt: "2026-09-06T00:00:00Z",
+    lastTouchedVersion: "2026.7.1",
+  };
+  original.gateway = {
+    tailscale: { mode: "off", resetOnExit: false },
+  };
+  original.agents.entries.main.memorySearch = {
+    enabled: true,
+    maxResults: 7,
+    chunking: { tokens: 256 },
+  };
+  original.agents.list = [{ id: "shadow", default: true }];
+  const originalText = `${JSON.stringify(original, null, 2)}\n`;
+  writeFileSync(configPath, originalText);
+
+  const result = await applyManagedRuntime({
+    stateDir,
+    validateConfig: async () => true,
+  });
+  assert.equal(result.status, "updated");
+  assert.equal(result.compatibilityUpdated, true);
+  assert.equal(result.reason, "Gmail delivery is not configured yet");
+  const saved = JSON.parse(readFileSync(configPath, "utf8"));
+  assert.deepEqual(saved.meta, { lastTouchedVersion: "2026.7.1" });
+  assert.deepEqual(saved.gateway.tailscale, { mode: "off" });
+  assert.equal(Object.hasOwn(saved.agents, "list"), false);
+  assert.equal(Object.hasOwn(saved.agents.entries, "shadow"), false);
+  assert.deepEqual(saved.agents.entries.main.memory.search, {
+    enabled: true,
+    query: { maxResults: 7 },
+  });
+  assert.equal(saved.agents.entries["mail-triage"], undefined);
+  assert.equal(
+    readFileSync(
+      join(stateDir, "backups/pre-openclaw-2026.8.2-config.json"),
+      "utf8",
+    ),
+    originalText,
+  );
+  assert.equal(
+    existsSync(join(stateDir, "backups/pre-gmail-cost-fix-v1.json")),
+    false,
+  );
+  assert.match(
+    readFileSync(join(stateDir, ".git/info/exclude"), "utf8"),
+    /backups\/pre-openclaw-2026\.8\.2-config\.json\*/,
+  );
+});
+
+test("compatibility normalization runs even without a Gmail mapping", async () => {
+  const { stateDir, configPath } = writeRuntimeFixture();
+  const original = JSON.parse(readFileSync(configPath, "utf8"));
+  delete original.hooks.mappings;
+  original.meta = { lastTouchedAt: "2026-09-06T00:00:00Z" };
+  writeFileSync(configPath, `${JSON.stringify(original, null, 2)}\n`);
+
+  const result = await applyManagedRuntime({
+    stateDir,
+    validateConfig: async () => true,
+  });
+  assert.deepEqual(result, {
+    status: "updated",
+    gmailManaged: false,
+    compatibilityUpdated: true,
+  });
+  const saved = JSON.parse(readFileSync(configPath, "utf8"));
+  assert.deepEqual(saved.meta, {});
+  assert.equal(saved.agents.entries["mail-triage"], undefined);
+  assert.equal(
+    existsSync(join(stateDir, "backups/pre-openclaw-2026.8.2-config.json")),
+    true,
+  );
 });
 
 test("non-JSON or included configs are skipped without blocking AlphaClaw", async () => {
@@ -1192,7 +1456,7 @@ test("a real OpenClaw gateway starts the recovery worker", async () => {
   );
   try {
     const output = await waitForOutput(child, /\[gateway\] ready/);
-    assert.match(output, /1 plugin: gmail-triage-recovery/);
+    assert.match(output, /\d+ plugins?: [^\n]*gmail-triage-recovery/);
     assert.equal(
       existsSync(join(stateDir, "runtime/gmail-triage.sqlite")),
       true,

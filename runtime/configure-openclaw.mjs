@@ -1,12 +1,16 @@
 import {
   chmodSync,
   existsSync,
+  mkdtempSync,
   mkdirSync,
   readFileSync,
   renameSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -19,6 +23,11 @@ const MANAGED_TRANSFORM = fileURLToPath(
 );
 const RECOVERY_PLUGIN_ID = "gmail-triage-recovery";
 const RECOVERY_PLUGIN_PATH = "/app/managed-plugins/gmail-triage-recovery.mjs";
+const RECOVERY_PLUGIN_SOURCE = fileURLToPath(
+  new URL("../managed-plugins/gmail-triage-recovery.mjs", import.meta.url),
+);
+const OPENCLAW_8_2_BACKUP_MODULE =
+  "backups/pre-openclaw-2026.8.2-config.json";
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
@@ -26,6 +35,345 @@ function clone(value) {
 
 function stringValue(value) {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizeAgentId(value) {
+  const trimmed = stringValue(value);
+  const normalized = trimmed.toLowerCase();
+  if (/^[a-z0-9][a-z0-9_-]{0,63}$/i.test(trimmed)) return normalized;
+  return (
+    normalized
+      .replace(/[^a-z0-9_-]+/g, "-")
+      .replace(/^-+/, "")
+      .replace(/-+$/, "")
+      .slice(0, 64) || "main"
+  );
+}
+
+function isPositiveInteger(value) {
+  return Number.isInteger(value) && value > 0;
+}
+
+function sanitizeSecretInput(value) {
+  if (typeof value === "string") return value;
+  if (!isRecord(value)) return undefined;
+  const source = value.source;
+  const provider = value.provider;
+  const id = value.id;
+  if (
+    !["env", "file", "exec", "store"].includes(source) ||
+    typeof provider !== "string" ||
+    !/^[a-z][a-z0-9_-]{0,63}$/.test(provider) ||
+    typeof id !== "string"
+  ) {
+    return undefined;
+  }
+  const environmentId = /^[A-Z][A-Z0-9_]{0,127}$/.test(id);
+  const fileId =
+    id === "value" ||
+    (id.startsWith("/") &&
+      id
+        .slice(1)
+        .split("/")
+        .every((segment) => /^(?:[^~]|~0|~1)*$/.test(segment)));
+  const execId =
+    /^[A-Za-z0-9][A-Za-z0-9._:/#-]{0,255}$/.test(id) &&
+    id.split("/").every((segment) => segment !== "." && segment !== "..");
+  if (
+    ((source === "env" || source === "store") && !environmentId) ||
+    (source === "file" && !fileId) ||
+    (source === "exec" && !execId)
+  ) {
+    return undefined;
+  }
+  return { source, provider, id };
+}
+
+function sanitizeMemorySearchConfig(value) {
+  if (!isRecord(value)) return {};
+  const sanitized = {};
+
+  if (typeof value.enabled === "boolean") sanitized.enabled = value.enabled;
+  if (typeof value.rememberAcrossConversations === "boolean") {
+    sanitized.rememberAcrossConversations = value.rememberAcrossConversations;
+  }
+  if (Array.isArray(value.sources)) {
+    sanitized.sources = value.sources.filter(
+      (source) => source === "memory" || source === "sessions",
+    );
+  }
+  if (Array.isArray(value.extraPaths)) {
+    sanitized.extraPaths = value.extraPaths
+      .map((entry) => {
+        if (typeof entry === "string") return entry;
+        if (!isRecord(entry) || typeof entry.path !== "string") return null;
+        return {
+          path: entry.path,
+          ...(typeof entry.pattern === "string"
+            ? { pattern: entry.pattern }
+            : {}),
+        };
+      })
+      .filter((entry) => entry !== null);
+  }
+  if (isRecord(value.multimodal)) {
+    const multimodal = {};
+    if (typeof value.multimodal.enabled === "boolean") {
+      multimodal.enabled = value.multimodal.enabled;
+    }
+    if (Array.isArray(value.multimodal.modalities)) {
+      multimodal.modalities = value.multimodal.modalities.filter((modality) =>
+        ["image", "audio", "all"].includes(modality),
+      );
+    }
+    if (isPositiveInteger(value.multimodal.maxFileBytes)) {
+      multimodal.maxFileBytes = value.multimodal.maxFileBytes;
+    }
+    if (Object.keys(multimodal).length > 0) sanitized.multimodal = multimodal;
+  }
+  if (
+    isRecord(value.experimental) &&
+    typeof value.experimental.sessionMemory === "boolean"
+  ) {
+    sanitized.experimental = {
+      sessionMemory: value.experimental.sessionMemory,
+    };
+  }
+  if (typeof value.provider === "string") {
+    sanitized.provider =
+      value.provider.trim().toLowerCase() === "auto" ? "openai" : value.provider;
+  }
+  if (isRecord(value.remote)) {
+    const remote = {};
+    if (typeof value.remote.baseUrl === "string") {
+      remote.baseUrl = value.remote.baseUrl;
+    }
+    const apiKey = sanitizeSecretInput(value.remote.apiKey);
+    if (apiKey !== undefined) remote.apiKey = apiKey;
+    if (isRecord(value.remote.headers)) {
+      const headers = {};
+      for (const [key, header] of Object.entries(value.remote.headers)) {
+        if (
+          !["__proto__", "prototype", "constructor"].includes(key) &&
+          typeof header === "string"
+        ) {
+          Object.defineProperty(headers, key, {
+            configurable: true,
+            enumerable: true,
+            value: header,
+            writable: true,
+          });
+        }
+      }
+      remote.headers = headers;
+    }
+    if (
+      isRecord(value.remote.batch) &&
+      typeof value.remote.batch.enabled === "boolean"
+    ) {
+      remote.batch = { enabled: value.remote.batch.enabled };
+    }
+    if (Object.keys(remote).length > 0) sanitized.remote = remote;
+  }
+  for (const key of [
+    "fallback",
+    "model",
+  ]) {
+    if (typeof value[key] === "string") sanitized[key] = value[key];
+  }
+  for (const key of ["inputType", "queryInputType", "documentInputType"]) {
+    if (typeof value[key] === "string" && value[key].length > 0) {
+      sanitized[key] = value[key];
+    }
+  }
+  if (isPositiveInteger(value.outputDimensionality)) {
+    sanitized.outputDimensionality = value.outputDimensionality;
+  }
+  if (isRecord(value.local) && typeof value.local.modelPath === "string") {
+    sanitized.local = { modelPath: value.local.modelPath };
+  }
+  if (isRecord(value.store)) {
+    const store = {};
+    if (
+      isRecord(value.store.fts) &&
+      ["unicode61", "trigram"].includes(value.store.fts.tokenizer)
+    ) {
+      store.fts = { tokenizer: value.store.fts.tokenizer };
+    }
+    if (isRecord(value.store.vector)) {
+      const vector = {};
+      if (typeof value.store.vector.enabled === "boolean") {
+        vector.enabled = value.store.vector.enabled;
+      }
+      if (typeof value.store.vector.extensionPath === "string") {
+        vector.extensionPath = value.store.vector.extensionPath;
+      }
+      if (Object.keys(vector).length > 0) store.vector = vector;
+    }
+    if (Object.keys(store).length > 0) sanitized.store = store;
+  }
+  if (isRecord(value.query)) {
+    const query = {};
+    if (isPositiveInteger(value.query.maxResults)) {
+      query.maxResults = value.query.maxResults;
+    }
+    if (
+      typeof value.query.minScore === "number" &&
+      Number.isFinite(value.query.minScore) &&
+      value.query.minScore >= 0 &&
+      value.query.minScore <= 1
+    ) {
+      query.minScore = value.query.minScore;
+    }
+    if (Object.keys(query).length > 0) sanitized.query = query;
+  }
+  if (
+    isPositiveInteger(value.maxResults) &&
+    !Object.hasOwn(sanitized.query || {}, "maxResults")
+  ) {
+    sanitized.query = {
+      ...(sanitized.query || {}),
+      maxResults: value.maxResults,
+    };
+  }
+  if (isRecord(value.cache) && typeof value.cache.enabled === "boolean") {
+    sanitized.cache = { enabled: value.cache.enabled };
+  }
+  return sanitized;
+}
+
+function mergeMissing(target, source) {
+  for (const [key, value] of Object.entries(source)) {
+    if (!Object.hasOwn(target, key)) {
+      target[key] = clone(value);
+    } else if (isRecord(target[key]) && isRecord(value)) {
+      mergeMissing(target[key], value);
+    }
+  }
+}
+
+function mergeLegacyAgentMemorySearch(entry) {
+  if (!isRecord(entry) || !Object.hasOwn(entry, "memorySearch")) return;
+  const legacy = sanitizeMemorySearchConfig(entry.memorySearch);
+  if (Object.keys(legacy).length > 0) {
+    if (!Object.hasOwn(entry, "memory")) entry.memory = {};
+    if (isRecord(entry.memory)) {
+      if (!Object.hasOwn(entry.memory, "search")) {
+        entry.memory.search = legacy;
+      } else if (isRecord(entry.memory.search)) {
+        mergeMissing(entry.memory.search, legacy);
+      }
+    }
+  }
+  delete entry.memorySearch;
+}
+
+function mergeLegacyGlobalMemorySearch(config, legacyValue) {
+  const legacy = sanitizeMemorySearchConfig(legacyValue);
+  if (Object.keys(legacy).length === 0) return;
+  if (!Object.hasOwn(config, "memory")) config.memory = {};
+  if (!isRecord(config.memory)) return;
+  if (!Object.hasOwn(config.memory, "search")) {
+    config.memory.search = legacy;
+  } else if (isRecord(config.memory.search)) {
+    mergeMissing(config.memory.search, legacy);
+  }
+}
+
+function usesVoyageMemory(config) {
+  const searches = [config.memory?.search];
+  const entries = isRecord(config.agents?.entries)
+    ? Object.values(config.agents.entries)
+    : [];
+  for (const entry of entries) searches.push(entry?.memory?.search);
+  return searches.some(
+    (search) =>
+      isRecord(search) &&
+      [search.provider, search.fallback].some(
+        (provider) => stringValue(provider).toLowerCase() === "voyage",
+      ),
+  );
+}
+
+function disableUnusedVoyagePlugin(config) {
+  const voyageProfile = Object.values(config.auth?.profiles || {}).some(
+    (profile) =>
+      isRecord(profile) &&
+      stringValue(profile.provider).toLowerCase() === "voyage",
+  );
+  if (!voyageProfile || usesVoyageMemory(config)) return;
+
+  if (!isRecord(config.plugins)) config.plugins = {};
+  if (!isRecord(config.plugins.entries)) config.plugins.entries = {};
+  if (!Object.hasOwn(config.plugins.entries, "voyage")) {
+    config.plugins.entries.voyage = { enabled: false };
+  }
+}
+
+function migrateOpenClaw2Config(config) {
+  if (isRecord(config.meta)) delete config.meta.lastTouchedAt;
+  if (isRecord(config.gateway?.tailscale)) {
+    delete config.gateway.tailscale.resetOnExit;
+  }
+
+  const agents = isRecord(config.agents) ? config.agents : null;
+  let entries = agents && isRecord(agents.entries) ? agents.entries : null;
+  if (agents) {
+    if (Object.hasOwn(agents, "entries")) {
+      delete agents.list;
+    } else if (Array.isArray(agents.list)) {
+      entries = {};
+      for (const agent of agents.list) {
+        if (!isRecord(agent)) continue;
+        const requestedId = normalizeAgentId(stringValue(agent.id) || "agent");
+        let id = requestedId;
+        let suffix = 2;
+        while (Object.hasOwn(entries, id)) {
+          id = `${requestedId}-${suffix}`;
+          suffix += 1;
+        }
+        const { id: _legacyId, ...legacyEntry } = agent;
+        Object.defineProperty(entries, id, {
+          configurable: true,
+          enumerable: true,
+          value: legacyEntry,
+          writable: true,
+        });
+      }
+      agents.entries = entries;
+      delete agents.list;
+    }
+
+    if (
+      isRecord(agents.defaults) &&
+      Object.hasOwn(agents.defaults, "memorySearch")
+    ) {
+      mergeLegacyGlobalMemorySearch(config, agents.defaults.memorySearch);
+      delete agents.defaults.memorySearch;
+    }
+  }
+
+  if (Object.hasOwn(config, "memorySearch")) {
+    mergeLegacyGlobalMemorySearch(config, config.memorySearch);
+    delete config.memorySearch;
+  }
+
+  if (entries) {
+    for (const entry of Object.values(entries)) {
+      mergeLegacyAgentMemorySearch(entry);
+    }
+  }
+
+  // OpenClaw 2026.8.2 treats a retained Voyage credential as a request to
+  // install the new embedding plugin. Keep an unused credential available
+  // without silently granting that plugin a new runtime capability.
+  disableUnusedVoyagePlugin(config);
+
+  return entries;
 }
 
 function gmailMapping(config) {
@@ -99,6 +447,8 @@ function ensurePrivateRuntimeFilesStayLocal(stateDir) {
     "runtime/gmail-delivery.json*",
     "runtime/gmail-triage.sqlite*",
     "runtime/gmail-triage.key*",
+    "runtime/openclaw-doctor-*.json",
+    `${OPENCLAW_8_2_BACKUP_MODULE}*`,
     "backups/pre-gmail-cost-fix-v1.json*",
     "backups/pre-gmail-cost-fix-v1-transform.mjs*",
     "workspace-mail-triage/",
@@ -125,23 +475,67 @@ async function validateWithInstalledOpenClaw(config, customValidator) {
     return;
   }
 
-  const { OpenClawSchema } = await import("openclaw/plugin-sdk/config-schema");
-  const result = OpenClawSchema.safeParse(config);
-  if (result.success) return;
-  const issues = result.error.issues
-    .slice(0, 10)
-    .map((issue) => `${issue.path.join(".") || "config"}: ${issue.message}`)
-    .join("; ");
-  throw new Error(`Managed OpenClaw config failed validation: ${issues}`);
+  const validationDir = mkdtempSync(join(tmpdir(), "openclaw-config-validate-"));
+  const validationPath = join(validationDir, "openclaw.json");
+  const validationConfig = clone(config);
+  if (Array.isArray(validationConfig.plugins?.load?.paths)) {
+    validationConfig.plugins.load.paths = validationConfig.plugins.load.paths.map(
+      (path) => path === RECOVERY_PLUGIN_PATH ? RECOVERY_PLUGIN_SOURCE : path,
+    );
+  }
+
+  try {
+    atomicWrite(
+      validationPath,
+      `${JSON.stringify(validationConfig, null, 2)}\n`,
+      0o600,
+    );
+    const entryPath = fileURLToPath(import.meta.resolve("openclaw"));
+    const cliPath = join(dirname(dirname(entryPath)), "openclaw.mjs");
+    const result = spawnSync(
+      process.execPath,
+      [cliPath, "config", "validate", "--json"],
+      {
+        encoding: "utf8",
+        timeout: 30_000,
+        env: {
+          ...process.env,
+          NO_COLOR: "1",
+          OPENCLAW_CONFIG_PATH: validationPath,
+          OPENCLAW_STATE_DIR: validationDir,
+        },
+      },
+    );
+    if (result.error) throw result.error;
+    let report;
+    try {
+      report = JSON.parse(result.stdout || "{}");
+    } catch {
+      throw new Error("OpenClaw config validation returned unreadable output");
+    }
+    if (result.status === 0 && report.valid === true) return;
+    const issues = Array.isArray(report.issues)
+      ? report.issues
+          .slice(0, 10)
+          .map((issue) => `${issue.path || "config"}: ${issue.message || "invalid"}`)
+          .join("; ")
+      : report.error?.message || "validation failed";
+    throw new Error(`Managed OpenClaw config failed validation: ${issues}`);
+  } finally {
+    rmSync(validationDir, { recursive: true, force: true });
+  }
 }
 
 export function patchOpenClawConfig(current, stateDir) {
   const config = clone(current);
+  migrateOpenClaw2Config(config);
   const mapping = gmailMapping(config);
   if (!mapping) return config;
 
-  config.agents ||= {};
-  config.agents.defaults ||= {};
+  if (!isRecord(config.agents)) config.agents = {};
+  if (!isRecord(config.agents.defaults)) config.agents.defaults = {};
+  if (!isRecord(config.agents.entries)) config.agents.entries = {};
+  const agentEntries = config.agents.entries;
   const configuredModels = config.agents.defaults.models;
   if (
     configuredModels &&
@@ -153,22 +547,20 @@ export function patchOpenClawConfig(current, stateDir) {
       [TRIAGE_MODEL]: configuredModels[TRIAGE_MODEL] || {},
     };
   }
-  config.agents.list = Array.isArray(config.agents.list)
-    ? config.agents.list
-    : [];
   if (
-    config.agents.list.length === 0 ||
-    config.agents.list.every((agent) => agent?.id === TRIAGE_AGENT_ID)
+    Object.keys(agentEntries).length === 0 ||
+    Object.keys(agentEntries).every((id) => id === TRIAGE_AGENT_ID)
   ) {
-    config.agents.list.unshift({ id: "main", default: true });
+    config.agents.entries = {
+      main: { default: true },
+      ...agentEntries,
+    };
   }
-  const existingIndex = config.agents.list.findIndex(
-    (agent) => agent?.id === TRIAGE_AGENT_ID,
-  );
-  const existing = existingIndex >= 0 ? config.agents.list[existingIndex] : {};
+  const existing = isRecord(config.agents.entries[TRIAGE_AGENT_ID])
+    ? config.agents.entries[TRIAGE_AGENT_ID]
+    : {};
   const managedAgent = {
     ...existing,
-    id: TRIAGE_AGENT_ID,
     default: false,
     name: "Mail triage",
     description: "Low-cost isolated filter for untrusted Gmail notifications",
@@ -179,7 +571,7 @@ export function patchOpenClawConfig(current, stateDir) {
     reasoningDefault: "off",
     contextInjection: "never",
     skills: [],
-    memorySearch: { enabled: false },
+    memory: { search: { enabled: false } },
     params: {
       ...(existing.params || {}),
       cacheRetention: "none",
@@ -187,9 +579,9 @@ export function patchOpenClawConfig(current, stateDir) {
     },
     tools: { profile: "minimal", deny: ["session_status"] },
   };
+  delete managedAgent.memorySearch;
 
-  if (existingIndex >= 0) config.agents.list[existingIndex] = managedAgent;
-  else config.agents.list.push(managedAgent);
+  config.agents.entries[TRIAGE_AGENT_ID] = managedAgent;
 
   mapping.action = "agent";
   mapping.agentId = TRIAGE_AGENT_ID;
@@ -265,31 +657,74 @@ export async function applyManagedRuntime(options = {}) {
     return { status: "skipped", reason: "Config uses includes" };
   }
 
-  const mapping = gmailMapping(original);
-  if (!mapping) return { status: "unchanged", gmailManaged: false };
+  const normalized = clone(original);
+  migrateOpenClaw2Config(normalized);
+  const normalizedText = `${JSON.stringify(normalized, null, 2)}\n`;
+  const compatibilityChanged =
+    normalizedText !== `${originalText.trimEnd()}\n`;
+  const compatibilityBackupPath = join(
+    stateDir,
+    OPENCLAW_8_2_BACKUP_MODULE,
+  );
+  const persistCompatibilityOnly = async (result) => {
+    if (!compatibilityChanged) return result;
+    await validateWithInstalledOpenClaw(normalized, options.validateConfig);
+    if (!existsSync(compatibilityBackupPath)) {
+      atomicWrite(
+        compatibilityBackupPath,
+        `${originalText.trimEnd()}\n`,
+        0o600,
+      );
+    }
+    ensurePrivateRuntimeFilesStayLocal(stateDir);
+    const mode = statSync(configPath).mode & 0o777;
+    atomicWrite(configPath, normalizedText, mode || 0o600);
+    return {
+      ...result,
+      status: "updated",
+      compatibilityUpdated: true,
+    };
+  };
+
+  const mapping = gmailMapping(normalized);
+  if (!mapping) {
+    return persistCompatibilityOnly({
+      status: "unchanged",
+      gmailManaged: false,
+    });
+  }
   const sourceModule = stringValue(mapping.transform?.module);
   const sourceTransformPath = sourceModule
     ? join(transformsDir, sourceModule)
     : join(transformsDir, "gmail/gmail-transform.mjs");
   const route = resolveRoute(mapping, sourceTransformPath, deliveryPath);
   if (!route) {
-    return {
+    return persistCompatibilityOnly({
       status: "skipped",
+      gmailManaged: true,
       reason: existsSync(sourceTransformPath)
         ? "Private Gmail delivery route must be restored"
         : "Gmail delivery is not configured yet",
-    };
+    });
   }
 
-  const patched = patchOpenClawConfig(original, stateDir);
+  const patched = patchOpenClawConfig(normalized, stateDir);
   await validateWithInstalledOpenClaw(patched, options.validateConfig);
 
   let changed = false;
   const patchedText = `${JSON.stringify(patched, null, 2)}\n`;
   const configChanged = patchedText !== `${originalText.trimEnd()}\n`;
+  const gmailConfigChanged = patchedText !== normalizedText;
+  if (compatibilityChanged && !existsSync(compatibilityBackupPath)) {
+    atomicWrite(
+      compatibilityBackupPath,
+      `${originalText.trimEnd()}\n`,
+      0o600,
+    );
+  }
   const backupPath = join(stateDir, "backups/pre-gmail-cost-fix-v1.json");
-  if (configChanged && !existsSync(backupPath)) {
-    atomicWrite(backupPath, `${originalText.trimEnd()}\n`, 0o600);
+  if (gmailConfigChanged && !existsSync(backupPath)) {
+    atomicWrite(backupPath, normalizedText, 0o600);
   }
   const transformBackupPath = join(
     stateDir,
