@@ -18,6 +18,7 @@ RUN npm ci --omit=dev --prefer-online && npm cache clean --force
 COPY runtime ./runtime
 RUN node ./runtime/patch-alphaclaw-webhook-dedupe.mjs
 RUN node ./runtime/patch-alphaclaw-agents-entries.mjs
+RUN node ./runtime/patch-section11-proxy.mjs
 COPY --from=dashboard /build/lib/public/dist ./node_modules/@chrysb/alphaclaw/lib/public/dist
 COPY --from=dashboard /build/lib/public/css/tailwind.generated.css ./node_modules/@chrysb/alphaclaw/lib/public/css/tailwind.generated.css
 COPY --from=dashboard /build/lib/public/css/vendor ./node_modules/@chrysb/alphaclaw/lib/public/css/vendor
