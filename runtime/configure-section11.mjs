@@ -47,7 +47,9 @@ connected, say it is unavailable. Do not substitute Garmin resting HR or mix
 WHOOP baselines with old Oura values. This overrides the old Oura-only rule.
 
 Proactive notifications are wanted for newly completed workouts, newly scored
-main sleep/recovery, and the daily plan. Routine repository maintenance is silent.
+main sleep/recovery with today’s training calendar. There is no fixed-time
+briefing. If no new WHOOP sleep arrives, do not send a morning message.
+Routine repository maintenance is silent.
 Automatic event ingestion is controlled by SECTION11_ENABLE_NOTIFICATIONS.
 Never claim an integration is connected without a successful current data read.
 Do not send historical data as new notifications. Setup tests must be labelled as tests.
