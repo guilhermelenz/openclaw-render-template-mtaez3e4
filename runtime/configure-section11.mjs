@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync, readFileSync, existsSync, copyFileSync, renameSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, existsSync, renameSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 
 // Optional personal coach. Its private repository is fetched at runtime, never
@@ -12,7 +12,8 @@ const checkout = `${root}/repository`;
 const workspace = '/data/.openclaw/workspace-section-11-coach';
 mkdirSync(root, { recursive: true, mode: 0o700 });
 writeFileSync(`${root}/deploy-key`, key.trim() + '\n', {mode: 0o600});
-const meta = await fetch('https://api.github.com/meta', {headers:{'User-Agent':'Section11-setup'}});
+try {
+const meta = await fetch('https://api.github.com/meta', {headers:{'User-Agent':'Section11-setup'},signal:AbortSignal.timeout(15000)});
 if (!meta.ok) throw new Error('Unable to retrieve GitHub SSH host keys');
 const keys = (await meta.json()).ssh_keys;
 if (!Array.isArray(keys) || !keys.length) throw new Error('GitHub SSH host keys missing');
@@ -23,6 +24,13 @@ const args = existsSync(`${checkout}/.git`)
   : ['clone', '--depth=1', `git@github.com:${repository}.git`, checkout];
 const pull = spawnSync('git', args, {env, encoding:'utf8', timeout:120000});
 if (pull.status !== 0) throw new Error('Section 11 repository sync failed');
+} catch {
+  if (!existsSync(`${checkout}/SECTION_11.md`)) {
+    console.error('Section 11 checkout unavailable; primary service will continue.');
+    process.exit(0);
+  }
+  console.error('Section 11 using cached repository; upstream refresh unavailable.');
+}
 mkdirSync(workspace, {recursive:true, mode:0o700});
 writeFileSync(`${workspace}/AGENTS.md`, `# Section 11 personal coach
 
@@ -57,8 +65,15 @@ if (existsSync(path)) {
   const agent=config.agents?.entries?.['section-11-coach'];
   if (!agent) throw new Error('Create the Section 11 agent before enabling it');
   agent.model={primary:'openai/gpt-5.6-sol',fallbacks:[]};
+  agent.models={...(agent.models || {}),'openai/gpt-5.6-sol':{agentRuntime:{id:'codex'}}};
+  agent.tools={...(agent.tools || {}),profile:'coding',deny:[...new Set([...(agent.tools?.deny || []),'message'])]};
   agent.utilityModel='openai/gpt-5.6-sol';
   agent.memory={...(agent.memory || {}),search:{enabled:false}};
+  const chat=process.env.SECTION11_TELEGRAM_CHAT_ID;
+  if (chat && /^\d+$/.test(chat)) {
+    const matches=b=>b.match?.channel==='telegram' && b.match?.peer?.kind==='direct' && b.match.peer.id===chat;
+    config.bindings=[{agentId:'section-11-coach',match:{channel:'telegram',accountId:'default',peer:{kind:'direct',id:chat}}},...(config.bindings || []).filter(b=>!matches(b))];
+  }
   const candidate=`${root}/candidate.json`;
   writeFileSync(candidate, JSON.stringify(config,null,2)+'\n', {mode:0o600});
   const validation=spawnSync('openclaw',['config','validate','--json'],{env:{...process.env,OPENCLAW_CONFIG_PATH:candidate},encoding:'utf8',timeout:30000});

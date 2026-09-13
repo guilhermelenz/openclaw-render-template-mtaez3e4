@@ -6,15 +6,18 @@ module.exports = function registerSection11(app) {
   const repository = '/data/section11/repository';
   if (!process.env.SECTION11_REPOSITORY || !existsSync(repository + '/proactive/server.py')) return;
   let stopping = false;
-  let child;
+  const children = new Set();
+  const supervise = (module) => {
   let failures = 0;
   const start = () => {
     if (stopping) return;
-    child = spawn('python3', ['-m', 'proactive.server'], {cwd:repository, env:process.env, stdio:['ignore','ignore','ignore']});
+    const child = spawn('python3', ['-m', module], {cwd:repository, env:process.env, stdio:['ignore','ignore','ignore']});
+    children.add(child);
     const retry = () => {
+      children.delete(child);
       if (!stopping) {
         failures++;
-        console.error('Section 11 ingress stopped; restarting.');
+        console.error('Section 11 process stopped; restarting.');
         setTimeout(start, Math.min(60000, 1000 * 2 ** Math.min(failures, 6))).unref();
       }
     };
@@ -22,7 +25,10 @@ module.exports = function registerSection11(app) {
     child.once('error', () => { console.error('Section 11 ingress could not start.'); });
   };
   start();
-  process.once('exit', () => { stopping=true; child?.kill(); });
+  };
+  supervise('proactive.server');
+  if (process.env.SECTION11_ENABLE_NOTIFICATIONS === 'true' && existsSync(repository + '/proactive/worker.py')) supervise('proactive.worker');
+  process.once('exit', () => { stopping=true; for (const child of children) child.kill(); });
   app.use((req,res,next) => {
     const path=req.url.split('?')[0];
     if (path !== '/section11' && !path.startsWith('/section11/')) return next();
