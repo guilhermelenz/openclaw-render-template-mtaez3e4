@@ -5,13 +5,16 @@ const {existsSync} = require('node:fs');
 module.exports = function registerSection11(app) {
   const repository = '/data/section11/repository';
   if (!process.env.SECTION11_REPOSITORY || !existsSync(repository + '/proactive/server.py')) return;
+  // Match the session-signing password captured by host auth registration.
+  // Later .env reloads must not change this for restarted child processes.
+  const setupPassword = process.env.SETUP_PASSWORD;
   let stopping = false;
   const children = new Set();
   const supervise = (module) => {
   let failures = 0;
   const start = () => {
     if (stopping) return;
-    const child = spawn('python3', ['-m', module], {cwd:repository, env:process.env, stdio:['ignore','ignore','ignore']});
+    const child = spawn('python3', ['-m', module], {cwd:repository, env:{...process.env, SETUP_PASSWORD:setupPassword}, stdio:['ignore','ignore','ignore']});
     children.add(child);
     const retry = () => {
       children.delete(child);
