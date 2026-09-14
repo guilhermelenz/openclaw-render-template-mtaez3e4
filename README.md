@@ -215,3 +215,7 @@ The Timus AlphaClaw Platform key was restricted to read-only as an independent
 paid-generation guard on September 13, 2026. Do not restore write permissions or
 add API-key fallbacks without an explicit decision to enable metered usage.
 Configuration backups remain private under `/data/subscription-routing-backup`.
+
+### Subscription routing repair (September 13, 2026)
+
+Main and Section 11 use GPT-5.6 Sol through the saved OpenAI subscription login. The authenticated subscription catalog did not list GPT-6 Astra; selecting Astra previously allowed the API credential to be used. The OpenAI key named Timus AlphaClaw is now Read only as an independent guard against paid generation. Keep it restricted. Startup restricts provider auth order globally and per agent to OAuth, pins the Codex runtime, and migrates old paid conversation preferences without changing transcript data. A missing or unavailable subscription must be repaired through subscription login, never by re-enabling API billing.

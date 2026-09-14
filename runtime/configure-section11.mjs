@@ -86,10 +86,12 @@ if (existsSync(path)) {
   const config=JSON.parse(original);
   const agent=config.agents?.entries?.['section-11-coach'];
   if (!agent) throw new Error('Create the Section 11 agent before enabling it');
-  agent.model={primary:'openai/gpt-6-astra',fallbacks:[]};
-  agent.models={...(agent.models || {}),'openai/gpt-6-astra':{agentRuntime:{id:'codex'}}};
+  // Verified in the signed-in subscription model catalog; Astra is API-only here.
+  agent.model={primary:'openai/gpt-5.6-sol',fallbacks:[]};
+  agent.models={...(agent.models || {}),'openai/gpt-5.6-sol':{agentRuntime:{id:'codex'}}};
+  delete agent.models['openai/gpt-6-astra'];
   agent.tools={...(agent.tools || {}),profile:'coding',deny:[...new Set([...(agent.tools?.deny || []),'message'])]};
-  agent.utilityModel='openai/gpt-6-astra';
+  agent.utilityModel='openai/gpt-5.6-sol';
   agent.memory={...(agent.memory || {}),search:{enabled:false}};
   const chat=process.env.SECTION11_TELEGRAM_CHAT_ID;
   if (chat && /^\d+$/.test(chat)) {
