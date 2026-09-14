@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
@@ -24,6 +25,29 @@ export function enforceSubscription(config) {
   return result;
 }
 
+export function migrateSessionAuth(dbPath, profiles, allowed) {
+ if (!existsSync(dbPath)) return 0;
+ const db = new DatabaseSync(dbPath);
+ let changed = 0;
+ try {
+  if (!db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='session_nodes'").get()) return 0;
+  db.exec('BEGIN IMMEDIATE');
+  const update = db.prepare('UPDATE session_nodes SET entry_json=? WHERE session_key=?');
+  for (const row of db.prepare('SELECT session_key,entry_json FROM session_nodes').all()) {
+   const entry = JSON.parse(row.entry_json);
+   const id = entry.authProfileOverride;
+   if (id && !allowed.includes(id) && (profiles[id]?.provider === 'openai' || id.startsWith('openai:'))) {
+    entry.authProfileOverride = allowed[0];
+    entry.authProfileOverrideSource = 'auto';
+    update.run(JSON.stringify(entry), row.session_key);
+    changed++;
+   }
+  }
+  db.exec('COMMIT');
+ } finally { db.close(); }
+ return changed;
+}
+
 export function applySubscriptionPolicy(path = '/data/.openclaw/openclaw.json') {
   if (!existsSync(path)) return;
   const original = readFileSync(path, 'utf8');
@@ -44,6 +68,8 @@ export function applySubscriptionPolicy(path = '/data/.openclaw/openclaw.json') 
     const order = spawnSync('openclaw', ['models', 'auth', 'order', 'set', '--agent', agent,
       '--provider', 'openai', ...updated.auth.order.openai], { encoding: 'utf8', timeout: 30000 });
     if (order.status !== 0) throw new Error(`Cannot enforce subscription auth for agent ${agent}`);
+    const changed = migrateSessionAuth(resolve(dirname(path), "agents", agent, "agent", "openclaw-agent.sqlite"), updated.auth.profiles, updated.auth.order.openai);
+    console.log(`Subscription routing: migrated ${changed} saved auth preferences for ${agent}.`);
   }
   console.log('OpenAI subscription-only auth enforced; API profiles excluded from agent selection.');
 }
