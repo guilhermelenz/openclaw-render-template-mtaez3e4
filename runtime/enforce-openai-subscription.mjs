@@ -57,7 +57,7 @@ export function applySubscriptionPolicy(path = '/data/.openclaw/openclaw.json') 
   const candidate = `${path}.subscription-candidate`;
   writeFileSync(candidate, JSON.stringify(updated, null, 2) + '\n', { mode: 0o600 });
   const check = spawnSync('openclaw', ['config', 'validate', '--json'], {
-    env: { ...process.env, OPENCLAW_CONFIG_PATH: candidate }, encoding: 'utf8', timeout: 30000,
+    env: { ...process.env, OPENCLAW_CONFIG_PATH: candidate, OPENCLAW_STATE_DIR: dirname(path) }, encoding: 'utf8', timeout: 30000,
   });
   if (check.status !== 0) throw new Error('Subscription routing configuration failed validation');
   const backup = '/data/subscription-routing-backup/openclaw-before-managed-policy.json';
@@ -66,8 +66,13 @@ export function applySubscriptionPolicy(path = '/data/.openclaw/openclaw.json') 
   renameSync(candidate, path);
   for (const agent of Object.keys(updated.agents?.entries || {})) {
     const order = spawnSync('openclaw', ['models', 'auth', 'order', 'set', '--agent', agent,
-      '--provider', 'openai', ...updated.auth.order.openai], { encoding: 'utf8', timeout: 30000 });
-    if (order.status !== 0) throw new Error(`Cannot enforce subscription auth for agent ${agent}`);
+      '--provider', 'openai', ...updated.auth.order.openai], {
+        env: { ...process.env, OPENCLAW_CONFIG_PATH: path, OPENCLAW_STATE_DIR: dirname(path) },
+        encoding: 'utf8', timeout: 30000 });
+    if (order.status !== 0) {
+      writeFileSync(`/data/subscription-routing-backup/order-error-${agent}.log`, (order.stderr || '') + (order.stdout || ''), { mode: 0o600 });
+      throw new Error(`Cannot enforce subscription auth for agent ${agent}; private diagnostic saved`);
+    }
     const changed = migrateSessionAuth(resolve(dirname(path), "agents", agent, "agent", "openclaw-agent.sqlite"), updated.auth.profiles, updated.auth.order.openai);
     console.log(`Subscription routing: migrated ${changed} saved auth preferences for ${agent}.`);
   }
