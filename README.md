@@ -201,3 +201,17 @@ The channel's env var is empty or missing. Go to the Envars tab, add the token, 
 - [OpenClaw docs](https://docs.openclaw.ai)
 - [OpenClaw GitHub](https://github.com/openclaw/openclaw)
 - [Community Discord](https://discord.com/invite/clawd)
+
+## Subscription-only OpenAI routing
+
+This deployment enforces OpenAI OAuth-only authentication at startup after the
+managed configuration steps. `runtime/enforce-openai-subscription.mjs` restricts
+global and per-agent OpenAI auth order to saved OAuth profiles, pins configured
+OpenAI model and utility routes to the Codex runtime, and refuses startup if no
+subscription profile is configured. A Codex runtime alone does not select billing:
+API-key profiles must also be excluded. Other providers are left unchanged.
+
+The Timus AlphaClaw Platform key was restricted to read-only as an independent
+paid-generation guard on September 13, 2026. Do not restore write permissions or
+add API-key fallbacks without an explicit decision to enable metered usage.
+Configuration backups remain private under `/data/subscription-routing-backup`.
