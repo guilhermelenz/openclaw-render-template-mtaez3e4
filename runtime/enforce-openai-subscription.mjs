@@ -33,13 +33,17 @@ export function migrateSessionAuth(dbPath, profiles, allowed) {
   if (!db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='session_nodes'").get()) return 0;
   db.exec('BEGIN IMMEDIATE');
   const update = db.prepare('UPDATE session_nodes SET entry_json=? WHERE session_key=?');
-  for (const row of db.prepare('SELECT session_key,entry_json FROM session_nodes').all()) {
+  for (const row of db.prepare('SELECT session_key,entry_json,entry_valid FROM session_nodes').all()) {
+   if (row.entry_valid !== 1) continue;
    const entry = JSON.parse(row.entry_json);
    const id = entry.authProfileOverride;
    if (id && !allowed.includes(id) && (profiles[id]?.provider === 'openai' || id.startsWith('openai:'))) {
     entry.authProfileOverride = allowed[0];
     entry.authProfileOverrideSource = 'auto';
     update.run(JSON.stringify(entry), row.session_key);
+    // OpenClaw invalidates rows after any JSON edit. Auth fields do not alter
+    // identity/lineage projections; restore the previously validated marker.
+    db.prepare('UPDATE session_nodes SET entry_valid=1 WHERE session_key=?').run(row.session_key);
     changed++;
    }
   }
