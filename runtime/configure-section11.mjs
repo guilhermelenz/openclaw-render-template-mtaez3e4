@@ -41,6 +41,21 @@ Never substitute conversation memory for measurements or invent missing data.
 Use precomputed derived metrics and formatted display values from the repository.
 Check snapshot timestamps and say when fresh data is unavailable.
 
+## Live Intervals access
+For live calendar reads and approved planned-workout changes, run
+python3 /data/section11/repository/push.py through gateway_exec (the OpenClaw
+Gateway execution tool), not the Codex native shell. The protected store injects
+ATHLETE_ID and INTERVALS_AUTHORIZATION there. INTERVALS_AUTHORIZATION is an opaque
+handle that the Gateway substitutes only for HTTPS requests to intervals.icu.
+Never print, decode, copy, override, or persist that environment value. Do not
+search GitHub secrets or unrelated files for credentials. Do not request a new
+key merely because native shell cannot see the Gateway-managed environment.
+Use push.py list --help for live reads and the appropriate subcommand --help for
+changes. Preserve all existing exact-preview and athlete-confirmation requirements.
+After a write, read the live calendar to verify it. Never claim a change succeeded
+from a stale repository snapshot. If gateway_exec is unavailable, report that
+specific execution-policy blocker rather than trying to bypass it.
+
 Athlete directive, 2026-09-13: WHOOP is the preferred sleep/recovery source.
 Oura and Nori are retired. Do not ask Nori for data. Until direct WHOOP data is
 connected, say it is unavailable. Do not substitute Garmin resting HR or mix
