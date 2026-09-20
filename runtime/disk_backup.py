@@ -12,6 +12,7 @@ run restored programs until deciding their target-host path mapping.
 """
 import argparse
 import hashlib
+import gzip
 import io
 import json
 import os
@@ -167,25 +168,26 @@ def backup(source, output, public_key, source_quiesced=False, workspace=None):
     manifest = []
     with create_private(output) as out:
         encrypted = EncryptWriter(out, key, public)
-        with tarfile.open(fileobj=encrypted, mode='w|gz', dereference=False, compresslevel=1) as archive:
-            for path in entries(source, exclude=excluded):
-                name = 'data' + ('/' + path.relative_to(source).as_posix() if path != source else '')
-                before = metadata(path, name)
-                info = archive.gettarinfo(str(path), arcname=name)
-                # Store hardlinked regular files independently; no external link resolution.
-                if before['type'] == 'file':
-                    info.type, info.linkname, info.size = tarfile.REGTYPE, '', before['size']
-                    with path.open('rb') as contents:
-                        archive.addfile(info, contents)
-                else:
-                    archive.addfile(info)
-                if metadata(path, name) != before:
-                    raise ValueError('Source changed during backup')
-                manifest.append(before)
-            payload = json.dumps(manifest).encode()
-            info = tarfile.TarInfo('backup-manifest.json')
-            info.size, info.mode = len(payload), 0o600
-            archive.addfile(info, io.BytesIO(payload))
+        with gzip.GzipFile(fileobj=encrypted, mode='wb', compresslevel=1) as compressed:
+            with tarfile.open(fileobj=compressed, mode='w|', dereference=False) as archive:
+                for path in entries(source, exclude=excluded):
+                    name = 'data' + ('/' + path.relative_to(source).as_posix() if path != source else '')
+                    before = metadata(path, name)
+                    info = archive.gettarinfo(str(path), arcname=name)
+                    # Store hardlinked regular files independently; no external link resolution.
+                    if before['type'] == 'file':
+                        info.type, info.linkname, info.size = tarfile.REGTYPE, '', before['size']
+                        with path.open('rb') as contents:
+                            archive.addfile(info, contents)
+                    else:
+                        archive.addfile(info)
+                    if metadata(path, name) != before:
+                        raise ValueError('Source changed during backup')
+                    manifest.append(before)
+                payload = json.dumps(manifest).encode()
+                info = tarfile.TarInfo('backup-manifest.json')
+                info.size, info.mode = len(payload), 0o600
+                archive.addfile(info, io.BytesIO(payload))
         encrypted.finish()
         out.flush()
         os.fsync(out.fileno())
