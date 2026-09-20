@@ -9,7 +9,9 @@ RUN npm ci --ignore-scripts && npm run build:ui
 
 FROM node:22.22.3-slim
 
-RUN apt-get update && apt-get install -y git curl procps python3 python3-requests poppler-utils python3-pil python3-docx python3-openpyxl make g++ cron tini && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y git curl procps python3 python3-venv python3-requests poppler-utils python3-pil python3-docx python3-openpyxl make g++ cron tini && rm -rf /var/lib/apt/lists/*
+COPY runtime/section11-requirements.txt /tmp/section11-requirements.txt
+RUN python3 -m venv /opt/section11 && /opt/section11/bin/pip install --no-cache-dir -r /tmp/section11-requirements.txt
 
 WORKDIR /app
 

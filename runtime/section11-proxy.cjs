@@ -8,13 +8,15 @@ module.exports = function registerSection11(app) {
   // Match the session-signing password captured by host auth registration.
   // Later .env reloads must not change this for restarted child processes.
   const setupPassword = process.env.SETUP_PASSWORD;
+  const remote = process.env.SECTION11_MODE === 'chatgpt';
   let stopping = false;
   const children = new Set();
   const supervise = (module) => {
   let failures = 0;
   const start = () => {
     if (stopping) return;
-    const child = spawn('python3', ['-m', module], {cwd:repository, env:{...process.env, SETUP_PASSWORD:setupPassword}, stdio:['ignore','ignore','ignore']});
+    const python = module === 'remote.server' ? '/opt/section11/bin/python' : 'python3';
+    const child = spawn(python, ['-m', module], {cwd:repository, env:{...process.env, SETUP_PASSWORD:setupPassword, ...(remote ? {SECTION11_ENABLE_NOTIFICATIONS:'false'} : {})}, stdio:['ignore','ignore','ignore']});
     children.add(child);
     const retry = () => {
       children.delete(child);
@@ -30,13 +32,17 @@ module.exports = function registerSection11(app) {
   start();
   };
   supervise('proactive.server');
-  if (process.env.SECTION11_ENABLE_NOTIFICATIONS === 'true' && existsSync(repository + '/proactive/worker.py')) supervise('proactive.worker');
+  if (remote) supervise('remote.server');
+  if (!remote && process.env.SECTION11_ENABLE_NOTIFICATIONS === 'true' && existsSync(repository + '/proactive/worker.py')) supervise('proactive.worker');
   process.once('exit', () => { stopping=true; for (const child of children) child.kill(); });
   app.use((req,res,next) => {
     const path=req.url.split('?')[0];
-    if (path !== '/section11' && !path.startsWith('/section11/')) return next();
-    const upstream = http.request({hostname:'127.0.0.1',port:3001,path:req.url,method:req.method,
-      headers:{...req.headers,host:'127.0.0.1:3001'},timeout:35000}, response => {
+    const mcpPaths = ['/section11/mcp','/section11/connect','/section11/health','/authorize','/token','/register','/revoke','/.well-known/oauth-authorization-server','/.well-known/oauth-protected-resource/section11/mcp'];
+    const isMcp = remote && mcpPaths.includes(path);
+    if (!isMcp && path !== '/section11' && !path.startsWith('/section11/')) return next();
+    const port = isMcp ? 3002 : 3001;
+    const upstream = http.request({hostname:'127.0.0.1',port,path:req.url,method:req.method,
+      headers:{...req.headers,host:`127.0.0.1:${port}`},timeout:120000}, response => {
       res.writeHead(response.statusCode,response.headers);
       response.pipe(res);
     });

@@ -1,5 +1,6 @@
 import { mkdirSync, writeFileSync, readFileSync, existsSync, renameSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { detachSection11 } from './detach-section11.mjs';
 
 // Optional personal coach. Its private repository is fetched at runtime, never
 // copied into this public template or the container image.
@@ -30,6 +31,20 @@ if (pull.status !== 0) throw new Error('Section 11 repository sync failed');
     process.exit(0);
   }
   console.error('Section 11 using cached repository; upstream refresh unavailable.');
+}
+if (process.env.SECTION11_MODE === 'chatgpt') {
+  const path = '/data/.openclaw/openclaw.json';
+  if (existsSync(path)) {
+    const original = readFileSync(path, 'utf8');
+    const candidate = `${root}/candidate.json`;
+    writeFileSync(candidate, JSON.stringify(detachSection11(JSON.parse(original)), null, 2)+'\n', {mode:0o600});
+    const validation = spawnSync('openclaw', ['config','validate','--json'], {env:{...process.env,OPENCLAW_CONFIG_PATH:candidate},encoding:'utf8',timeout:30000});
+    if (validation.status !== 0) throw new Error('Section 11 detachment validation failed');
+    if (!existsSync(`${root}/pre-chatgpt-config.json`)) writeFileSync(`${root}/pre-chatgpt-config.json`, original, {mode:0o600});
+    renameSync(candidate, path);
+  }
+  console.log('Section 11 remote service ready; OpenClaw coach detached, records preserved.');
+  process.exit(0);
 }
 mkdirSync(workspace, {recursive:true, mode:0o700});
 writeFileSync(`${workspace}/AGENTS.md`, `# Section 11 personal coach
