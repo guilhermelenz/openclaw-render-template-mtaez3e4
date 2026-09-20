@@ -1,7 +1,10 @@
 """Offline full-directory backup and restore verification. Requires cryptography.
 Stop every source writer before backup; --source-quiesced is an operator assertion,
 not a process stopper. Include SQLite DB/WAL/SHM together. Never run backup against
-an active disk. The random key is separate: keep it off Render in protected storage.
+an active disk. Optional --workspace creates ONLY source/.retirement-export and
+excludes that newly created backup-output directory; no existing directory may
+be excluded. A failed run leaves its partial encrypted output for inspection.
+The random key is separate: keep it off Render in protected storage.
 Only restore into a NEW directory. File modes and symlink targets are retained;
 restored ownership belongs to the local user (original UID/GID remain in archive). Symlinks are preserved but created LAST so no
 archive content is written through them. Absolute symlinks remain absolute; do not
@@ -100,10 +103,12 @@ class DecryptReader(io.RawIOBase):
         return size
 
 
-def entries(root):
+def entries(root, exclude=None):
     yield root
     def walk(directory):
         for child in sorted(directory.iterdir()):
+            if exclude is not None and child == exclude:
+                continue
             yield child
             if child.is_dir() and not child.is_symlink():
                 yield from walk(child)
@@ -134,22 +139,36 @@ def metadata(path, name):
     return item
 
 
-def backup(source, output, public_key, source_quiesced=False):
+def backup(source, output, public_key, source_quiesced=False, workspace=None):
     if not source_quiesced:
         raise ValueError('All source writers must be stopped first')
     source = Path(source).absolute()
     if source.is_symlink() or not source.is_dir():
         raise ValueError('Source must be a directory, not a symlink')
+    excluded = None
+    if workspace is not None:
+        excluded = Path(workspace).absolute()
+        # One reserved top-level directory, created exclusively by this operation.
+        # Never accept pre-existing directories: they may contain real user data.
+        if excluded != source / '.retirement-export' or excluded.exists() or excluded.is_symlink():
+            raise ValueError('Workspace must be the new reserved source/.retirement-export directory')
+        if not Path(output).absolute().is_relative_to(excluded):
+            raise ValueError('Output must be inside the reserved workspace')
     for path in (output, public_key):
-        if Path(path).absolute().is_relative_to(source):
-            raise ValueError('Backup and key must be outside source')
+        absolute = Path(path).absolute()
+        if '..' in absolute.parts:
+            raise ValueError('Parent traversal is forbidden')
+        if absolute.is_relative_to(source) and not (excluded is not None and path == output and absolute.is_relative_to(excluded)):
+            raise ValueError('Backup and key must be outside source except the reserved workspace')
+    if excluded is not None:
+        excluded.mkdir(mode=0o700)
     key = AESGCM.generate_key(bit_length=256)
     public = serialization.load_pem_public_key(Path(public_key).read_bytes())
     manifest = []
     with create_private(output) as out:
         encrypted = EncryptWriter(out, key, public)
-        with tarfile.open(fileobj=encrypted, mode='w|gz', dereference=False) as archive:
-            for path in entries(source):
+        with tarfile.open(fileobj=encrypted, mode='w|gz', dereference=False, compresslevel=1) as archive:
+            for path in entries(source, exclude=excluded):
                 name = 'data' + ('/' + path.relative_to(source).as_posix() if path != source else '')
                 before = metadata(path, name)
                 info = archive.gettarinfo(str(path), arcname=name)
@@ -170,7 +189,7 @@ def backup(source, output, public_key, source_quiesced=False):
         encrypted.finish()
         out.flush()
         os.fsync(out.fileno())
-    return {'entries': len(manifest), 'encrypted_bytes': Path(output).stat().st_size}
+    return {'entries': len(manifest), 'encrypted_bytes': Path(output).stat().st_size, 'excluded_generated_workspace': '.retirement-export' if excluded is not None else None}
 
 
 def safe_name(name):
@@ -277,6 +296,7 @@ def main():
     for name in ('source', 'output', 'public_key'):
         b.add_argument(name)
     b.add_argument('--source-quiesced', action='store_true', required=True)
+    b.add_argument('--workspace', help='Create and exclude ONLY source/.retirement-export; directory must not exist')
     r = commands.add_parser('restore-verify')
     for name in ('backup_file', 'key_file', 'destination'):
         r.add_argument(name)
